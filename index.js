@@ -3,8 +3,29 @@ require("dotenv").config();
 const DEBUG = true;
 
 const config = {
+    organization: "Axactor.Finland",
+    shareTree: "FileShare",
+    fieldSeparator: "\t",
+    lineSeparator: "\n",
     jiraAddress: process.env.VITE_JIRAURL,
     jiraToken: process.env.VITE_JIRATOKEN,
+    traversableObjectTypes: [
+        300, // Access Management
+        301, // Intility Access Group
+        427, // Access Role
+        1788, // Job Role
+    ],
+    specialAccounts: [
+        // /\.Role\./i,
+        // /\.Profile\./i,
+        /CREATOROWNER$/,
+        /NTAUTHORITY\\SYSTEM$/,
+        /acolyte/,
+        /IISAPPPOOL/,
+    ],
+
+    maxSearchIterations: 100,
+    maxResultsPerPage: 10,
 };
 
 const params = {
@@ -27,7 +48,9 @@ const params = {
     },
     permissions: {},
     resolvedAccess: {},
+    groupList: {},
     userList: {},
+    fetchCounter: 0,
 };
 
 async function main() {
@@ -50,7 +73,8 @@ async function main() {
             if (DEBUG) console.log(" -- ", agKey, ":", agLabel);
 
             const members = await getGroupMembers(
-                ag.referencedObject.objectKey
+                ag.referencedObject.objectKey,
+                1 // IndentCount
             );
 
             Object.entries(members).map((m) => {
@@ -65,19 +89,14 @@ async function main() {
                     level: 0,
                 };
                 params.resolvedAccess[foKey].members[mKey].level |= agPerm;
-                // Delete: flags &= ~ISSUE_FAVORITE
-                // Add:    flags |= ISSUE_FAVORITE
-                // Toggle: flags ^= ISSUE_FAVORITE
+                // Delete: flags &= ~LEVEL
+                // Add:    flags |= LEVEL
+                // Toggle: flags ^= LEVEL
             });
         }
-
-        // console.log("Members:", gm, "\n\n");
     }
-    // console.log(params.searchResult);
-    // console.log(params.resolvedAccess);
 
     // Draw access matrix
-
     // Header
     let header = ["Key", "Folder"];
     for (const ul of Object.entries(params.userList)) {
@@ -86,7 +105,7 @@ async function main() {
         const uLabel = ul[1].name;
         header.push(uLabel);
     }
-    header = header.join(";");
+    header = header.join(config.fieldSeparator);
 
     // Body
     let bodyLines = [header];
@@ -122,38 +141,52 @@ async function main() {
             }
             body.push(ll);
         }
-        bodyLines.push(body.join(";"));
-        // for (const members of Object.entries(foMap.members)) {
-        //     const mKey = members[0];
-        //     const mMap = members[1];
-        // const foKey = access[0];
+        bodyLines.push(body.join(config.fieldSeparator));
     }
 
-    const bodyString = bodyLines.join("\n");
-    console.log(bodyString);
+    const bodyString = bodyLines.join(config.lineSeparator);
 
+    let filename = new Date().toISOString(); // '2012-11-04T14:51:06.157Z'
+    filename = filename.replace(/T/, "_"); // replace T with underscore
+    filename = filename.replace(/\..+/, ""); // delete the dot and everything after
+    filename = config.organization + "_" + filename + ".csv";
+    filename = filename.replace(/[ :-]/g, ""); // remove space, colon and minus
+
+    const fs = require("node:fs");
+    fs.writeFile(filename, bodyString, (err) => {
+        if (err) {
+            console.error(err);
+        }
+    });
+
+    console.log(`${params.fetchCounter} fetch requests`);
+    console.log(performance.now(), "ms runtime");
     console.log("== Ended ==");
+}
+
+function indent(count) {
+    const text = " -- ";
+    return text.repeat(count);
 }
 
 async function searchCMDB() {
     params.loading["search"] = true;
-    // clearTimeout(params.clearInputTimeout);
     try {
-        //let url = "/data.json";
         let page = 1;
-        let leftToFetch = 0;
         let result = false;
         do {
             let url = config.jiraAddress + "/iql/objects";
             url += `?page=${page}`;
-            url += `&resultPerPage=10`;
-            url += `&iql=objectType IN ("Sweden FileShare")`;
+            url += `&resultPerPage=${config.maxResultsPerPage}`;
+            url += `&iql=objectType in ("FileShare", "Sweden FileShare", "Finland FileShare", "Norway FileShare", "Germany FileShare", "Italy FileShare", "Spain FileShare")`;
+            url += ` and "Ownership (Organization)" IN ("${config.organization}")`;
             if (DEBUG) console.log("Request: ", url);
             const response = await fetch(url, {
                 headers: {
                     Authorization: "Bearer " + config.jiraToken,
                 },
             });
+            params.fetchCounter++;
             result = await response.json();
 
             result.objectEntries.map((o, index) => {
@@ -178,26 +211,16 @@ async function searchCMDB() {
             });
 
             page += 1;
-        } while (result && result.toIndex < result.totalFilterCount);
+        } while (
+            result &&
+            result.toIndex < result.totalFilterCount &&
+            page < config.maxSearchIterations
+        );
     } catch (err) {
         console.error("Exception", err);
     } finally {
         params.loading["search"] = false;
     }
-}
-
-async function getUserDetails(objectKey) {
-    if (DEBUG) console.log(`Get details for ${objectKey}.`);
-    params.loading[objectKey] = true;
-    const user = await getObject(objectKey);
-    const userdata = {
-        objectKey: user.objectKey,
-        label: user.label,
-        type: user.objectType.name,
-        link: user._links.self,
-    };
-    params.allUsers[objectKey] = userdata;
-    return params.allUsers[objectKey];
 }
 
 function getPermissionFromName(folderName) {
@@ -208,12 +231,20 @@ function getPermissionFromName(folderName) {
     else return params.perm.X;
 }
 
-async function getGroupMembers(groupObjectKey) {
-    if (DEBUG) console.log("Get members of group", groupObjectKey);
+async function getGroupMembers(groupObjectKey, indentCount) {
+    if (DEBUG)
+        console.log(
+            indent(indentCount),
+            "Get members of group",
+            groupObjectKey
+        );
 
     // Check if result is already cached.
-    if (params.groupMembers[groupObjectKey])
+    // Quick exit if result is already cached.
+    if (params.groupMembers[groupObjectKey]) {
+        console.log(`Cache hit on ${groupObjectKey}.`);
         return params.groupMembers[groupObjectKey];
+    }
 
     // Set defaults
     params.groupMembers[groupObjectKey] ??= {};
@@ -224,50 +255,86 @@ async function getGroupMembers(groupObjectKey) {
         return f.objectTypeAttribute.name == "Access Group Members";
     });
 
-    accessGroupMembers.objectAttributeValues.map((userObject) => {
-        // Make simple user object
-        //params.groupMembers[groupObjectKey] ??= {};
-        const person = {
-            objectKey: userObject.referencedObject.objectKey,
-            name: userObject.referencedObject.label,
-            heritage: userObject.referencedObject.objectType.name,
-            url: userObject.referencedObject._links.self,
-        };
+    // Loop over members
+    if (accessGroupMembers)
+        for (const memberObject of accessGroupMembers?.objectAttributeValues) {
+            const member = await getMemberDetails(memberObject);
+            console.log(
+                `Member ${member.name} (${member.objectKey}) T:${member.traversable} S:${member.special}`
+            );
 
-        // Filter away special entries
-        const filters = [
-            /\.Role\./i,
-            /\.Profile\./i,
-            /CREATOROWNER$/,
-            /NTAUTHORITY\\SYSTEM$/,
-            /acolyte/,
-            /IISAPPPOOL/,
-            /\-NormalUser$/,
-        ];
-        const filterTest = filters.some((re) => {
-            return re.test(person.name);
-        });
+            // Regular user/member
+            if (!member.traversable && !member.special) {
+                console.log(
+                    indent(indentCount),
+                    `Added member ${member.objectKey}, ${member.name}, ${member.heritage}`
+                );
+                params.groupMembers[groupObjectKey][member.objectKey] = member;
+                params.userList[member.objectKey] ??= member;
+            }
 
-        if (DEBUG)
-            console.log(" ---- :", person.objectKey, person.name, filterTest);
-        if (!filterTest) {
-            params.groupMembers[groupObjectKey][person.objectKey] = person;
-            params.userList[person.objectKey] ??= person;
+            // Group
+            if (member.traversable) {
+                await traverseMember(groupObjectKey, member, indentCount);
+            }
         }
+
+    return params.groupMembers[groupObjectKey];
+}
+
+async function getMemberDetails(memberObject) {
+    // Make simple user object
+    const member = {
+        objectKey: memberObject.referencedObject.objectKey,
+        name: memberObject.referencedObject.label,
+        heritage: memberObject.referencedObject.objectType.name,
+        url: memberObject.referencedObject._links.self,
+        parentType: memberObject.referencedObject.objectType.parentObjectTypeId,
+        special: false,
+        traversable: false,
+    };
+    console.log(`Got member details for ${member.objectKey}, ${member.name}`);
+
+    // Set special flag based on name criterias
+    member.special = config.specialAccounts.some((re) => {
+        return re.test(member.name);
     });
 
-    //      // Resolve each member
-    //      const members = [];
-    //      accessGroupMembers.objectAttributeValues.map(async (groupMember) => {
-    //          // Get details for each user
-    //        const user = await getUserDetails(
-    //          groupMember.referencedObject.objectKey
-    //          );
-    //
-    //      });
+    // Set traversable if member is a group
+    member.traversable = config.traversableObjectTypes.includes(
+        member.parentType
+    );
 
-    // params.groupMembers[objectKey] = members;
-    return params.groupMembers[groupObjectKey];
+    return member;
+}
+
+async function traverseMember(groupObjectKey, member, indentCount = 0) {
+    // return list of objectKeys
+    // Insert object keys into params.groupMembers[groupObjectKey]
+    let traversalCounter = 0;
+    let traversedMembers = await getGroupMembers(
+        member.objectKey,
+        indentCount + 1
+    );
+    try {
+        for (const tmIndex in traversedMembers) {
+            const tm = traversedMembers[tmIndex];
+            params.groupMembers[groupObjectKey][tm.objectKey] = tm;
+            traversalCounter += 1;
+        }
+        console.log(
+            indent(indentCount),
+            "Added",
+            traversalCounter,
+            "members from ",
+            member.objectKey,
+            member.name
+        );
+    } catch (ex) {
+        console.error("error at traverse");
+        console.error("EX:", ex);
+        console.error("VAL:", typeof traversedMembers, traversedMembers);
+    }
 }
 
 async function getObject(objectKey) {
@@ -280,6 +347,7 @@ async function getObject(objectKey) {
                 Authorization: "Bearer " + config.jiraToken,
             },
         });
+        params.fetchCounter++;
         const resultData = await response.json();
         params.objectCache[objectKey] = resultData;
         return params.objectCache[objectKey];
