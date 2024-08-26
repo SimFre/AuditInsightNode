@@ -355,5 +355,5 @@ async function getObject(objectKey) {
     }
 }
 
-// Execute
+// Run!
 main();
