@@ -3,7 +3,7 @@ require("dotenv").config();
 const DEBUG = true;
 
 const config = {
-    organization: "Axactor.Finland",
+    organization: "Axactor.Sweden",
     shareTree: "FileShare",
     fieldSeparator: "\t",
     lineSeparator: "\n",
@@ -62,7 +62,7 @@ async function main() {
         shareIndex++;
         const foKey = folderObject.objectKey;
         const foLabel = folderObject.label;
-        if (DEBUG) console.log(`Share ${shareIndex}:`, foKey, foLabel);
+        console.log(`Share ${shareIndex}:`, foKey, foLabel);
 
         folderObject.accessGroups ??= [];
         for (const ag of folderObject.accessGroups) {
@@ -70,7 +70,7 @@ async function main() {
             const agLabel = ag.referencedObject.label;
             const agPerm = getPermissionFromName(agLabel);
             params.permissions[agKey] = agPerm;
-            if (DEBUG) console.log(" -- ", agKey, ":", agLabel);
+            console.log(" -- ", agKey, ":", agLabel);
 
             const members = await getGroupMembers(
                 ag.referencedObject.objectKey,
@@ -180,7 +180,7 @@ async function searchCMDB() {
             url += `&resultPerPage=${config.maxResultsPerPage}`;
             url += `&iql=objectType in ("FileShare", "Sweden FileShare", "Finland FileShare", "Norway FileShare", "Germany FileShare", "Italy FileShare", "Spain FileShare")`;
             url += ` and "Ownership (Organization)" IN ("${config.organization}")`;
-            if (DEBUG) console.log("Request: ", url);
+            console.log(`Request #${page}: `, url);
             const response = await fetch(url, {
                 headers: {
                     Authorization: "Bearer " + config.jiraToken,
@@ -221,6 +221,7 @@ async function searchCMDB() {
     } finally {
         params.loading["search"] = false;
     }
+    console.log("Size of params.searchResult:", params.searchResult.length);
 }
 
 function getPermissionFromName(folderName) {
